@@ -1,0 +1,54 @@
+# Dependencies (will be installed fresh)
+node_modules
+npm-debug.log
+yarn-error.log
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Tests
+test
+tests
+*.test.ts
+*.test.js
+*.spec.ts
+*.spec.js
+coverage
+
+# Documentation
+README.md
+CHANGELOG.md
+docs
+
+# CI/CD
+.github
+.gitlab-ci.yml
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts (if any)
+dist
+build

@@ -1,0 +1,62 @@
+version: '3.8'
+
+services:
+  app:
+    # Build configuration
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production  # Use the production stage
+    
+    # Port mapping
+    ports:
+      - "3000:3000"
+    
+    # Environment variables
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+    
+    # Volume mounts (hot reload for development)
+    volumes:
+      - .:/app
+      - /app/node_modules  # Don't override node_modules
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    
+    # Resource limits (prevent runaway processes)
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+    # Security hardening
+    security_opt:
+      - no-new-privileges:true  # Prevent privilege escalation
+    
+    cap_drop:
+      - ALL  # Drop all Linux capabilities
+    
+    cap_add:
+      - NET_BIND_SERVICE  # Only add capability to bind to port 3000
+    
+    read_only: true  # Read-only root filesystem
+    
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m  # Writable /tmp with restrictions
+
+volumes:
+  app-tmp:  # Named volume for /tmp

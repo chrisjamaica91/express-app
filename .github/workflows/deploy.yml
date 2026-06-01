@@ -1,0 +1,258 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'Dockerfile'
+      - 'package.json'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  security-events: write
+  pull-requests: write
+
+env:
+  AWS_REGION: us-east-2
+  ECR_REPOSITORY: express-app
+  ECS_CLUSTER: express-app-cluster
+  ECS_SERVICE: express-app-service
+  NODE_VERSION: '20'
+
+jobs:
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for gitleaks
+
+      - name: Run gitleaks (Secret Scanning)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+      - name: Run Hadolint (Dockerfile Linting)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+
+      - name: Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  build:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: security-scan
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-deployment-role
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-BuildPush
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+          tags: |
+            type=sha,prefix={{branch}}-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=pr
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:buildcache
+          cache-to: type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:buildcache,mode=max
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-image-results.sarif'
+
+      - name: Upload Trivy image scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-image-results.sarif'
+
+      - name: Wait for ECR scan
+        run: |
+          echo "Waiting for ECR vulnerability scan..."
+          sleep 30
+          
+          aws ecr wait image-scan-complete \
+            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --image-id imageTag=${{ github.sha }} \
+            --region ${{ env.AWS_REGION }} || true
+
+      - name: Get ECR scan results
+        id: ecr-scan
+        run: |
+          SCAN_FINDINGS=$(aws ecr describe-image-scan-findings \
+            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --image-id imageTag=${{ github.sha }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'imageScanFindings.findingSeverityCounts' \
+            --output json)
+          
+          echo "scan-results=$SCAN_FINDINGS" >> $GITHUB_OUTPUT
+          
+          echo "## 🔍 ECR Vulnerability Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
+          echo "$SCAN_FINDINGS" | jq '.' >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+  deploy:
+    name: Deploy to ECS
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: http://${{ steps.get-alb.outputs.alb-dns }}
+    steps:
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-deployment-role
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-Deploy
+
+      - name: Get ALB DNS
+        id: get-alb
+        run: |
+          ALB_DNS=$(aws elbv2 describe-load-balancers \
+            --region ${{ env.AWS_REGION }} \
+            --query 'LoadBalancers[?starts_with(LoadBalancerName, `express-app-alb`)].DNSName' \
+            --output text)
+          echo "alb-dns=$ALB_DNS" >> $GITHUB_OUTPUT
+
+      - name: Update ECS service
+        run: |
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE }} \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Wait for deployment
+        run: |
+          echo "Waiting for ECS service to stabilize..."
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Verify deployment
+        id: verify
+        run: |
+          ALB_DNS="${{ steps.get-alb.outputs.alb-dns }}"
+          
+          echo "Testing health endpoint..."
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://$ALB_DNS/health)
+          
+          if [ "$RESPONSE" = "200" ]; then
+            echo "✅ Health check passed"
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Health check failed with status $RESPONSE"
+            echo "status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: AI Deployment Analysis
+        if: always()
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # Get recent CloudWatch logs
+          LOG_EVENTS=$(aws logs filter-log-events \
+            --log-group-name /ecs/${{ env.ECS_SERVICE }} \
+            --start-time $(($(date +%s) - 300))000 \
+            --limit 50 \
+            --region ${{ env.AWS_REGION }} \
+            --query 'events[*].message' \
+            --output text | head -c 2000)
+
+          PROMPT="Analyze this ECS deployment and provide insights:
+
+          Deployment Status: ${{ steps.verify.outputs.status }}
+          Commit: ${{ github.sha }}
+          
+          Recent logs:
+          $LOG_EVENTS
+
+          Provide:
+          1. Deployment health assessment
+          2. Any errors or warnings detected
+          3. Performance recommendations
+          Keep response under 150 words."
+
+          RESPONSE=$(curl -s https://api.openai.com/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $OPENAI_API_KEY" \
+            -d "{
+              \"model\": \"gpt-4o-mini\",
+              \"messages\": [{\"role\": \"user\", \"content\": $(echo "$PROMPT" | jq -Rs .)}],
+              \"temperature\": 0.7,
+              \"max_tokens\": 250
+            }")
+          
+          AI_ANALYSIS=$(echo $RESPONSE | jq -r '.choices[0].message.content')
+          
+          echo "## 🤖 AI Deployment Analysis" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "$AI_ANALYSIS" >> $GITHUB_STEP_SUMMARY
+
+      - name: Post deployment summary
+        if: success()
+        run: |
+          echo "## ✅ Deployment Successful" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** ${{ needs.build.outputs.image-tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Digest:** ${{ needs.build.outputs.image-digest }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Health Check:** http://${{ steps.get-alb.outputs.alb-dns }}/health" >> $GITHUB_STEP_SUMMARY
