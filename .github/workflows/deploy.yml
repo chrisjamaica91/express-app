@@ -5,9 +5,9 @@ on:
     branches:
       - main
     paths:
-      - 'src/**'
-      - 'Dockerfile'
-      - 'package.json'
+      - "src/**"
+      - "Dockerfile"
+      - "package.json"
   pull_request:
     branches:
       - main
@@ -24,7 +24,7 @@ env:
   ECR_REPOSITORY: express-app
   ECS_CLUSTER: express-app-cluster
   ECS_SERVICE: express-app-service
-  NODE_VERSION: '20'
+  NODE_VERSION: "20"
 
 jobs:
   security-scan:
@@ -34,7 +34,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Full history for gitleaks
+          fetch-depth: 0 # Full history for gitleaks
 
       - name: Run gitleaks (Secret Scanning)
         uses: gitleaks/gitleaks-action@v2
@@ -49,23 +49,24 @@ jobs:
           failure-threshold: warning
 
       - name: Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@master
         with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'sarif'
-          output: 'trivy-results.sarif'
+          scan-type: "fs"
+          scan-ref: "."
+          format: "sarif"
+          output: "trivy-results.sarif"
 
       - name: Upload Trivy results to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
-          sarif_file: 'trivy-results.sarif'
+          sarif_file: "trivy-results.sarif"
 
   build:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
     needs: security-scan
+    if: github.ref == 'refs/heads/main'
     outputs:
       image-tag: ${{ steps.meta.outputs.tags }}
       image-digest: ${{ steps.build.outputs.digest }}
@@ -106,23 +107,23 @@ jobs:
           cache-to: type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:buildcache,mode=max
 
       - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
-          format: 'sarif'
-          output: 'trivy-image-results.sarif'
+          format: "sarif"
+          output: "trivy-image-results.sarif"
 
       - name: Upload Trivy image scan results
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
-          sarif_file: 'trivy-image-results.sarif'
+          sarif_file: "trivy-image-results.sarif"
 
       - name: Wait for ECR scan
         run: |
           echo "Waiting for ECR vulnerability scan..."
           sleep 30
-          
+
           aws ecr wait image-scan-complete \
             --repository-name ${{ env.ECR_REPOSITORY }} \
             --image-id imageTag=${{ github.sha }} \
@@ -137,9 +138,9 @@ jobs:
             --region ${{ env.AWS_REGION }} \
             --query 'imageScanFindings.findingSeverityCounts' \
             --output json)
-          
+
           echo "scan-results=$SCAN_FINDINGS" >> $GITHUB_OUTPUT
-          
+
           echo "## 🔍 ECR Vulnerability Scan Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
@@ -191,10 +192,10 @@ jobs:
         id: verify
         run: |
           ALB_DNS="${{ steps.get-alb.outputs.alb-dns }}"
-          
+
           echo "Testing health endpoint..."
           RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://$ALB_DNS/health)
-          
+
           if [ "$RESPONSE" = "200" ]; then
             echo "✅ Health check passed"
             echo "status=success" >> $GITHUB_OUTPUT
@@ -222,7 +223,7 @@ jobs:
 
           Deployment Status: ${{ steps.verify.outputs.status }}
           Commit: ${{ github.sha }}
-          
+
           Recent logs:
           $LOG_EVENTS
 
@@ -241,9 +242,9 @@ jobs:
               \"temperature\": 0.7,
               \"max_tokens\": 250
             }")
-          
+
           AI_ANALYSIS=$(echo $RESPONSE | jq -r '.choices[0].message.content')
-          
+
           echo "## 🤖 AI Deployment Analysis" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "$AI_ANALYSIS" >> $GITHUB_STEP_SUMMARY
