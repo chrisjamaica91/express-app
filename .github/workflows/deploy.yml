@@ -157,39 +157,6 @@ jobs:
         with:
           sarif_file: "trivy-image-results.sarif"
 
-      - name: Wait for ECR scan
-        run: |
-          ENV_TAG="${{ needs.detect-environment.outputs.environment }}-${{ github.sha }}"
-
-          echo "Waiting for ECR vulnerability scan..."
-          sleep 30
-
-          aws ecr wait image-scan-complete \
-            --repository-name ${{ env.ECR_REPOSITORY }} \
-            --image-id imageTag=$ENV_TAG \
-            --region ${{ env.AWS_REGION }} || true
-
-      - name: Get ECR scan results
-        id: ecr-scan
-        run: |
-          ENV_TAG="${{ needs.detect-environment.outputs.environment }}-${{ github.sha }}"
-
-          SCAN_FINDINGS=$(aws ecr describe-image-scan-findings \
-            --repository-name ${{ env.ECR_REPOSITORY }} \
-            --image-id imageTag=$ENV_TAG \
-            --region ${{ env.AWS_REGION }} \
-            --query 'imageScanFindings.findingSeverityCounts' \
-            --output json)
-
-          echo "scan-results=$SCAN_FINDINGS" >> $GITHUB_OUTPUT
-
-          echo "## 🔍 ECR Vulnerability Scan Results" >> $GITHUB_STEP_SUMMARY
-          echo "**Environment:** \`${{ needs.detect-environment.outputs.environment }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
-          echo "$SCAN_FINDINGS" | jq '.' >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-
   deploy:
     name: Deploy to ECS
     runs-on: ubuntu-latest
