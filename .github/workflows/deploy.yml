@@ -147,7 +147,7 @@ jobs:
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ needs.detect-environment.outputs.environment }}-${{ github.sha }}
           format: "sarif"
           output: "trivy-image-results.sarif"
 
@@ -159,12 +159,14 @@ jobs:
 
       - name: Wait for ECR scan
         run: |
+          ENV_TAG="${{ needs.detect-environment.outputs.environment }}-${{ github.sha }}"
+
           echo "Waiting for ECR vulnerability scan..."
           sleep 30
 
           aws ecr wait image-scan-complete \
             --repository-name ${{ env.ECR_REPOSITORY }} \
-            --image-id imageTag=${{ github.sha }} \
+            --image-id imageTag=$ENV_TAG \
             --region ${{ env.AWS_REGION }} || true
 
       - name: Get ECR scan results
